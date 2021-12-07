@@ -34,14 +34,6 @@ class CarInterface(CarInterfaceBase):
       ret.safetyConfigs = [get_safety_config(car.CarParams.SafetyModel.volkswagen)]
       ret.enableBsm = 0x30F in fingerprint[0]  # SWA_01
 
-      # Disable the radar and let openpilot control longitudinal
-      # WARNING: THIS DISABLES FACTORY FCW/AEB!
-      if Params().get_bool("DisableRadar"):
-        ret.pcmCruise = False
-        ret.openpilotLongitudinalControl = True
-        ret.directAccelControl = True
-        ret.safetyConfigs[0].safetyParam |= Panda.FLAG_VOLKSWAGEN_LONGITUDINAL
-
       if 0xAD in fingerprint[0]:  # Getriebe_11
         ret.transmissionType = TransmissionType.automatic
       elif 0x187 in fingerprint[0]:  # EV_Gearshift
@@ -54,6 +46,10 @@ class CarInterface(CarInterfaceBase):
       else:
         ret.networkLocation = NetworkLocation.fwdCamera
 
+      if Params().get_bool("DisableRadar") and ret.networkLocation == NetworkLocation.gateway:
+        ret.openpilotLongitudinalControl = True
+        ret.safetyConfigs[0].safetyParam |= Panda.FLAG_VOLKSWAGEN_LONGITUDINAL
+
     # Global lateral tuning defaults, can be overridden per-vehicle
 
     ret.steerActuatorDelay = 0.05
@@ -63,18 +59,20 @@ class CarInterface(CarInterfaceBase):
     tire_stiffness_factor = 1.0  # Let the params learner figure this out
     ret.lateralTuning.pid.kpBP = [0.]
     ret.lateralTuning.pid.kiBP = [0.]
-    ret.lateralTuning.pid.kf = 0.00004
+    ret.lateralTuning.pid.kf = 0.00006
     ret.lateralTuning.pid.kpV = [0.6]
     ret.lateralTuning.pid.kiV = [0.2]
 
     # Global longitudinal tuning defaults, can be overridden per-vehicle
 
+    ret.pcmCruise = not ret.openpilotLongitudinalControl
     ret.longitudinalActuatorDelayUpperBound = 1.0  # s
     ret.stoppingControl = True
-    ret.vEgoStopping = 1.0
-    ret.stopAccel = 0.0
-    ret.startAccel = 0.0
-    ret.longitudinalTuning.kpV = [0.1]
+    ret.vEgoStopping = 0.4
+    ret.vEgoStarting = 0.5
+    ret.startAccel = 0.5
+    ret.stopAccel = -1.0
+    ret.longitudinalTuning.kpV = [0.0]
     ret.longitudinalTuning.kiV = [0.0]
 
     # Per-chassis tuning values, override tuning defaults here if desired
@@ -250,6 +248,7 @@ class CarInterface(CarInterfaceBase):
                    c.hudControl.leftLaneDepart,
                    c.hudControl.rightLaneDepart,
                    c.hudControl.leadVisible,
-                   c.hudControl.setSpeed)
+                   c.hudControl.setSpeed,
+                   c.hudControl.speedVisible)
     self.frame += 1
     return can_sends

@@ -20,14 +20,16 @@ class CarState(CarStateBase):
   def update(self, pt_cp, cam_cp, ext_cp, trans_type):
     ret = car.CarState.new_message()
     # Update vehicle speed and acceleration from ABS wheel speeds.
-    ret.wheelSpeeds.fl = pt_cp.vl["ESP_19"]["ESP_VL_Radgeschw_02"] * CV.KPH_TO_MS
-    ret.wheelSpeeds.fr = pt_cp.vl["ESP_19"]["ESP_VR_Radgeschw_02"] * CV.KPH_TO_MS
-    ret.wheelSpeeds.rl = pt_cp.vl["ESP_19"]["ESP_HL_Radgeschw_02"] * CV.KPH_TO_MS
-    ret.wheelSpeeds.rr = pt_cp.vl["ESP_19"]["ESP_HR_Radgeschw_02"] * CV.KPH_TO_MS
+    ret.wheelSpeeds = self.get_wheel_speeds(
+      pt_cp.vl["ESP_19"]["ESP_VL_Radgeschw_02"],
+      pt_cp.vl["ESP_19"]["ESP_VR_Radgeschw_02"],
+      pt_cp.vl["ESP_19"]["ESP_HL_Radgeschw_02"],
+      pt_cp.vl["ESP_19"]["ESP_HR_Radgeschw_02"],
+    )
 
     ret.vEgoRaw = float(np.mean([ret.wheelSpeeds.fl, ret.wheelSpeeds.fr, ret.wheelSpeeds.rl, ret.wheelSpeeds.rr]))
     ret.vEgo, ret.aEgo = self.update_speed_kf(ret.vEgoRaw)
-    ret.standstill = ret.vEgoRaw < 0.1
+    ret.standstill = ret.vEgo < 0.1
 
     # Update steering angle, rate, yaw rate, and driver input torque. VW send
     # the sign/direction in a separate signal so they must be recombined.
@@ -95,13 +97,15 @@ class CarState(CarStateBase):
     ret.stockAeb = bool(ext_cp.vl["ACC_10"]["ANB_Teilbremsung_Freigabe"]) or bool(ext_cp.vl["ACC_10"]["ANB_Zielbremsung_Freigabe"])
 
     # Update ACC radar status.
+    self.acc_04_stock_values = ext_cp.vl["ACC_04"]
+    self.acc_13_stock_values = ext_cp.vl["ACC_13"]
     self.tsk_status = pt_cp.vl["TSK_06"]["TSK_Status"]
     if self.tsk_status == 2:
       # ACC okay and enabled, but not currently engaged
       ret.cruiseState.available = True
       ret.cruiseState.enabled = False
     elif self.tsk_status in [3, 4, 5]:
-      # ACC okay and enabled, currently regulating speed (3) or driver accel override (4) or overrun coast-down (5)
+      # ACC okay and enabled, currently regulating speed (3) or driver accel override (4) or brake only (5)
       ret.cruiseState.available = True
       ret.cruiseState.enabled = True
     else:
@@ -109,9 +113,9 @@ class CarState(CarStateBase):
       ret.cruiseState.available = False
       ret.cruiseState.enabled = False
 
-    if not self.CP.openpilotLongitudinalControl:
-      # Update ACC setpoint. When the setpoint is zero or there's an error, the
-      # radar sends a set-speed of ~90.69 m/s / 203mph.
+    # Update ACC setpoint. When the setpoint is zero or there's an error, the
+    # radar sends a set-speed of ~90.69 m/s / 203mph.
+    if self.CP.pcmCruise:
       ret.cruiseState.speed = ext_cp.vl["ACC_02"]["ACC_Wunschgeschw"] * CV.KPH_TO_MS
       if ret.cruiseState.speed > 90:
         ret.cruiseState.speed = 0
@@ -263,13 +267,21 @@ class MqbExtraSignals:
   # Additional signal and message lists for optional or bus-portable controllers
   fwd_radar_signals = [
     ("ACC_Wunschgeschw", "ACC_02", 0),              # ACC set speed
+    ("ACC_Charisma_FahrPr", "ACC_04", 0),           # Driving profile selection
+    ("ACC_Charisma_Status", "ACC_04", 0),           # Driving profile status
+    ("ACC_Charisma_Umschaltung", "ACC_04", 0),      # Driving profile switching
+    ("ACC_Texte_braking_guard","ACC_04",0),         # Part of ACC driver alerts in instrument cluster
     ("AWV2_Freigabe", "ACC_10", 0),                 # FCW brake jerk release
     ("ANB_Teilbremsung_Freigabe", "ACC_10", 0),     # AEB partial braking release
     ("ANB_Zielbremsung_Freigabe", "ACC_10", 0),     # AEB target braking release
+    ("Unknown_Osc_1", "ACC_13", 0),                 # Unknown oscillating value (checksum/xor?)
+    ("Unknown_Osc_2", "ACC_13", 0),                 # Unknown oscillating value (checksum/xor?)
   ]
   fwd_radar_checks = [
     ("ACC_10", 50),                                 # From J428 ACC radar control module
     ("ACC_02", 17),                                 # From J428 ACC radar control module
+    ("ACC_04", 17),                                 # From J428 ACC radar control module
+    ("ACC_13", 17),                                 # From J428 ACC radar control module
   ]
   bsm_radar_signals = [
     ("SWA_Infostufe_SWA_li", "SWA_01", 0),          # Blind spot object info, left

@@ -27,7 +27,7 @@ class CarController():
     self.acc_stopping = False
 
   def update(self, enabled, CS, frame, ext_bus, actuators, visual_alert, left_lane_visible, right_lane_visible, left_lane_depart,
-             right_lane_depart, lead_visible, set_speed):
+             right_lane_depart, lead_visible, set_speed, speed_visible):
     """ Controls thread """
 
     can_sends = []
@@ -35,41 +35,55 @@ class CarController():
     # **** Acceleration and Braking Controls ******************************** #
 
     if CS.CP.openpilotLongitudinalControl:
-      if CS.tsk_status in [2, 3, 4, 5]:
-        acc_status = 3 if enabled else 2
-      else:
-        acc_status = CS.tsk_status
-
-      accel = clip(actuators.accel, P.ACCEL_MIN, P.ACCEL_MAX) if enabled else 0
-
-      acc_hold_request, acc_hold_release = False, False
-      if actuators.longControlState == LongCtrlState.stopping:
-        accel = -1.0
-        self.acc_stopping = True
-        acc_hold_request = not CS.esp_hold_confirmation
-      elif enabled:
-        if self.acc_stopping:
-          self.acc_starting = True
-          self.acc_stopping = False
-        self.acc_starting &= CS.out.vEgo < 0.2
-        acc_hold_release = CS.esp_hold_confirmation
-      else:
-        self.acc_stopping, self.acc_starting = False, False
-
-      if acc_hold_request:
-        weird_value = 0x88
-      elif self.acc_stopping:
-        weird_value = 0x95
-      else:
-        weird_value = 0x7F
-
       if frame % P.ACC_CONTROL_STEP == 0:
+        if CS.tsk_status in [2, 3, 4, 5]:
+          acc_status = 3 if enabled else 2
+        else:
+          acc_status = CS.tsk_status
+
+        accel = clip(actuators.accel, P.ACCEL_MIN, P.ACCEL_MAX) if enabled else 0
+
+        # FIXME: this needs to become a proper state machine
+        acc_hold_request, acc_hold_release, acc_hold_type, stopping_distance = False, False, 0, 20.46
+        if actuators.longControlState == LongCtrlState.stopping and CS.out.vEgo < 0.2:
+          self.acc_stopping = True
+          acc_hold_request = True
+          if CS.esp_hold_confirmation:
+            acc_hold_type = 1  # hold
+            stopping_distance = 3.5
+          else:
+            acc_hold_type = 3  # hold_standby
+            stopping_distance = 0.5
+        elif enabled:
+          if self.acc_stopping:
+            self.acc_starting = True
+            self.acc_stopping = False
+          self.acc_starting &= CS.out.vEgo < 1.5
+          acc_hold_release = self.acc_starting
+          acc_hold_type = 4 if self.acc_starting and CS.out.vEgo < 0.1 else 0  # startup
+        else:
+          self.acc_stopping, self.acc_starting = False, False
+
+        cb_pos = 0.0 if lead_visible or CS.out.vEgo < 2.0 else 0.1  # react faster to lead cars, also don't get hung up at DSG clutch release/kiss points when creeping to stop
+        cb_neg = 0.0 if accel < 0 else 0.2  # IDK why, but stock likes to zero this out when accel is negative
+
         idx = (frame / P.ACC_CONTROL_STEP) % 16
         can_sends.append(volkswagencan.create_mqb_acc_06_control(self.packer_pt, CANBUS.pt, enabled, acc_status,
-                                                                 accel, self.acc_stopping, self.acc_starting, idx))
-        can_sends.append(volkswagencan.create_mqb_acc_07_control(self.packer_pt, CANBUS.pt, enabled,
                                                                  accel, self.acc_stopping, self.acc_starting,
-                                                                 acc_hold_request, acc_hold_release, weird_value, idx))
+                                                                 cb_pos, cb_neg, idx))
+        can_sends.append(volkswagencan.create_mqb_acc_07_control(self.packer_pt, CANBUS.pt, enabled,
+                                                                 accel, acc_hold_request, acc_hold_release,
+                                                                 acc_hold_type, stopping_distance, idx))
+
+      if frame % P.ACC_HUD_STEP == 0:
+        idx = (frame / P.ACC_HUD_STEP) % 16
+        can_sends.append(volkswagencan.create_mqb_acc_02_control(self.packer_pt, CANBUS.pt, CS.tsk_status,
+                                                                 set_speed * CV.MS_TO_KPH, speed_visible, lead_visible,
+                                                                 idx))
+        can_sends.append(volkswagencan.create_mqb_acc_04_control(self.packer_pt, CANBUS.pt, CS.acc_04_stock_values,
+                                                                 idx))
+        can_sends.append(volkswagencan.create_mqb_acc_13_control(self.packer_pt, CANBUS.pt, enabled,
+                                                                 CS.acc_13_stock_values))
 
     # **** Steering Controls ************************************************ #
 
@@ -127,26 +141,19 @@ class CarController():
                                                             right_lane_visible, CS.ldw_stock_values,
                                                             left_lane_depart, right_lane_depart))
 
-    if CS.CP.openpilotLongitudinalControl:
-      if frame % P.ACC_HUD_STEP == 0:
-        idx = (frame / P.ACC_HUD_STEP) % 16
-        can_sends.append(volkswagencan.create_mqb_acc_hud_control(self.packer_pt, CANBUS.pt, CS.tsk_status,
-                                                                  set_speed * CV.MS_TO_KPH, idx))
-
     # **** ACC Button Controls ********************************************** #
 
     # FIXME: this entire section is in desperate need of refactoring
 
-    if not CS.CP.openpilotLongitudinalControl:
+    if CS.CP.pcmCruise:
       if frame > self.graMsgStartFramePrev + P.GRA_VBP_STEP:
         if not enabled and CS.out.cruiseState.enabled:
           # Cancel ACC if it's engaged with OP disengaged.
           self.graButtonStatesToSend = BUTTON_STATES.copy()
           self.graButtonStatesToSend["cancel"] = True
-        elif enabled and CS.out.standstill and CS.esp_hold_confirmation:
+        elif enabled and CS.esp_hold_confirmation:
           # Blip the Resume button if we're engaged at standstill.
           # FIXME: This is a naive implementation, improve with visiond or radar input.
-          # A subset of MQBs like to "creep" too aggressively with this implementation.
           self.graButtonStatesToSend = BUTTON_STATES.copy()
           self.graButtonStatesToSend["resumeCruise"] = True
 
