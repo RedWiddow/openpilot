@@ -3,7 +3,7 @@
 Table of Contents
 =======================
 
-* [What is openpilot?](#what-is-openpilot)
+* [What is openpilot?](#what-is-openpilot3)
 * [Running in a car](#running-in-a-car)
 * [Running on PC](#running-on-pc)
 * [Community and Contributing](#community-and-contributing)
